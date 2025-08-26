@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 import os
 import csv
 import cv2
+import math
 
 # TODO: Make it so that non-square grids can be used for full and rectangular crop (e.g., 8 strata turned into 4x2 grid)
 
@@ -1439,6 +1440,19 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
 
         self.setFocus(QtCore.Qt.NoFocusReason) # Needed or the keyboard will not work
 
+    def SortPointsClockwise(self, points):
+        # Calculate the centroid (average of x and y coordinates)
+        cx = sum(x for x, y in points) / len(points)
+        cy = sum(y for x, y in points) / len(points)
+        
+        # Function to calculate angle relative to the centroid
+        def angle_from_centroid(point):
+            x, y = point
+            return math.atan2(y - cy, x - cx)
+        
+        # Sort points by angle
+        return sorted(points, key=angle_from_centroid)
+
     def ZoomOut(self):
         if self.numSurroundingPixels < 300:
             self.numSurroundingPixels += 25
@@ -1519,6 +1533,23 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
 
         return points
 
+    def ShoelaceArea(self, vertices):
+        """
+        Calculate the area of a polygon using the Shoelace formula.
+        
+        :param vertices: List of (x, y) tuples representing the vertices of the polygon in order.
+        :return: Absolute area of the polygon.
+        """
+        n = len(vertices)
+        area = 0
+
+        for i in range(n):
+            x1, y1 = vertices[i]
+            x2, y2 = vertices[(i + 1) % n]  # Next vertex, wrapping around
+            area += x1 * y2 - y1 * x2
+
+        return abs(area) / 2
+
     def RecordDataPoint(self, value):
         # -1 is go back
         if value == -1 and self.gridIndex > 0: # move back one sample
@@ -1530,10 +1561,6 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
             self.gridIndex += 1
 
         if self.gridIndex >= self.numGrids:
-            areaFraction = np.sum(self.poreData) / self.numGrids
-            pixelArea = areaFraction * self.countArea
-            self.areaDistribution.append(pixelArea)
-
             poreData2D = np.reshape(self.poreData, (self.numCols, self.numRows)).astype(np.uint8)
             poreData2D = np.pad(poreData2D, 1, "constant", constant_values=0)
             boundaryMask = find_boundaries(poreData2D, mode='inner', background=0)
@@ -1542,6 +1569,10 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
             sampleLocations2D = np.reshape(self.samplePositions, (self.numCols, self.numRows, 2)).astype(np.int16)
 
             boundaryPixels = sampleLocations2D[boundaryMask]
+            boundaryPixels = self.SortPointsClockwise(boundaryPixels)
+
+            pixelArea = self.ShoelaceArea(boundaryPixels)
+            self.areaDistribution.append(pixelArea)
             
             for i in range(len(boundaryPixels)-1):
                 pixels = self.BresenhamLine(boundaryPixels[i][0], boundaryPixels[i][1], boundaryPixels[i+1][0], boundaryPixels[i+1][1])
