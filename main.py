@@ -1,8 +1,10 @@
 import numpy as np
 import scipy.stats
 import scipy.optimize
+from skimage.segmentation import find_boundaries
 from skimage import io
 from skimage.color import gray2rgb
+import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Qt5Agg")
 from PyQt5 import QtWidgets, QtGui, QtCore
@@ -21,21 +23,19 @@ class PixelMap:
         self.rows = len(image)
         self.cols = len(image[0])
         self.numPixels = self.rows * self.cols
-        self.originalImage = image # grayscale or rgb
 
-        if np.max(image) <= 1.0:
-            self.originalImage *= 255
-            self.originalImage = self.originalImage.astype(int)
+        # Enforce RGB color
+        if len(np.shape(image)) == 3 and np.shape(image)[2] == 3: # image is rgb
+            self.originalImage = image
+        elif len(np.shape(image)) == 3 and np.shape(image)[2] == 4: # image is rgba
+            self.originalImage = image[:,:,:3]
+        else: # image is grayscale
+            self.originalImage = gray2rgb(image)
 
     # Overlay a grid onto the original image and return centered around that grid
     def GetImageWithGridOverlay(self, pixelRow:int, pixelCol:int, newColor:tuple, numSurroundingPixels:int, style:int) -> np.ndarray: 
         
-        if len(np.shape(self.originalImage)) == 3 and np.shape(self.originalImage)[2] == 3: # image is rgb
-            displayImage = np.copy(self.originalImage)
-        elif len(np.shape(self.originalImage)) == 3 and np.shape(self.originalImage)[2] == 4: # image is rgba
-            displayImage = np.copy(self.originalImage[:,:,:3])
-        else: # image is grayscale
-            displayImage = gray2rgb(self.originalImage)
+        displayImage = np.copy(self.originalImage)
         
         # Center
         if style == 0:
@@ -74,8 +74,17 @@ class PixelMap:
     def GetCroppedImage(self, leftBound, rightBound, topBound, bottomBound):
         return self.originalImage[topBound:bottomBound, leftBound:rightBound]
     
-    def GetCroppedAndMaskedImage(self, leftBound, rightBound, topBound, bottomBound, polygonPoints):
+    def GetCroppedAndMaskedImage(self, leftBound, rightBound, topBound, bottomBound):
         return self.originalImage[topBound:bottomBound, leftBound:rightBound]
+
+
+    def ChangePixelColor(self, pixelRow, pixelCol, newColor):
+        self.originalImage[pixelRow, pixelCol, 0] = newColor[0]
+        self.originalImage[pixelRow, pixelCol, 1] = newColor[1]
+        self.originalImage[pixelRow, pixelCol, 2] = newColor[2]
+
+    def ToNumpy(self):
+        return self.originalImage
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -92,6 +101,8 @@ class SetupWidget(QtWidgets.QWidget):
 
         self.parentTab = parentTab
         self.countAreaBounds = None
+
+        self.savedAreaDistributions = []
 
         # Step 1 widgets and layout
         self.step1Number = QtWidgets.QLabel("1")
@@ -159,6 +170,9 @@ class SetupWidget(QtWidgets.QWidget):
         # Begin measurement button
         self.beginMeasurementButton = QtWidgets.QPushButton("Begin Measurement")
 
+        # Begin size dist measurement button
+        self.beginSizeDistMeasurementButton = QtWidgets.QPushButton("Begin Size Distribution Measurement")
+
         # Export results button
         self.exportPreviousResultsButton = QtWidgets.QPushButton("Export previous results to csv")
         
@@ -181,6 +195,24 @@ class SetupWidget(QtWidgets.QWidget):
             self.previousResultsTable.item(0, i).setFont(font)
             self.previousResultsTable.item(0, i).setTextAlignment(QtCore.Qt.AlignCenter)
 
+        # Previous results table
+        self.previousResultsTable2 = QtWidgets.QTableWidget()
+        self.previousResultsTable2.setRowCount(1)
+        self.previousResultsTable2.setColumnCount(3)
+        self.previousResultsTable2.setItem(0,0, QtWidgets.QTableWidgetItem("Image Name"))
+        self.previousResultsTable2.setItem(0,1, QtWidgets.QTableWidgetItem("Show Histogram"))
+        self.previousResultsTable2.setItem(0,2, QtWidgets.QTableWidgetItem("Export Data"))
+        self.previousResultsTable2.setStyleSheet("border: 1px solid black; gridline-color: gray")
+        self.previousResultsTable2.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.previousResultsTable2.verticalHeader().setVisible(False)
+        self.previousResultsTable2.horizontalHeader().setVisible(False)
+        font = QtGui.QFont("Arial", 12)
+        font.setBold(True)
+        for i in range(3):
+            self.previousResultsTable2.item(0, i).setBackground(QtGui.QColor(196,217,244))
+            self.previousResultsTable2.item(0, i).setFont(font)
+            self.previousResultsTable2.item(0, i).setTextAlignment(QtCore.Qt.AlignCenter)
+
         # Empty space separator
         empty = QtWidgets.QFrame()
 
@@ -194,8 +226,10 @@ class SetupWidget(QtWidgets.QWidget):
         fullWidgetLayout.addWidget(self.step3Widget, stretch=1)
         fullWidgetLayout.addWidget(empty, stretch=1)
         fullWidgetLayout.addWidget(self.beginMeasurementButton, stretch=1)
+        fullWidgetLayout.addWidget(self.beginSizeDistMeasurementButton, stretch=1)
         fullWidgetLayout.addWidget(empty, stretch=1)
         fullWidgetLayout.addWidget(self.previousResultsTable)
+        fullWidgetLayout.addWidget(self.previousResultsTable2)
         fullWidgetLayout.addWidget(self.exportPreviousResultsButton)
 
         self.setLayout(fullWidgetLayout)
@@ -208,6 +242,7 @@ class SetupWidget(QtWidgets.QWidget):
         self.selectCircCropButton.clicked.connect(self.CircularCrop)
         self.selectAnnularCropButton.clicked.connect(self.AnnularCrop)
         self.beginMeasurementButton.clicked.connect(self.BeginMeasurement)
+        self.beginSizeDistMeasurementButton.clicked.connect(self.BeginSizeDistMeasurement)
         self.setMOEbox.textChanged.connect(self.CheckMOEandCI)
         self.setCIbox.textChanged.connect(self.CheckMOEandCI)
         self.exportPreviousResultsButton.clicked.connect(self.WriteResultsToCsv)
@@ -459,6 +494,41 @@ class SetupWidget(QtWidgets.QWidget):
             msg.setWindowTitle("Error")
             msg.exec_()
 
+    def ShowPreviousHistogram(self):
+        button = self.sender()
+        index = self.previousResultsTable2.indexAt(button.pos()).row()
+
+        # Show the histogram for the last saved area distribution
+        histogram = self.savedAreaDistributions[index-1]
+        plt.hist(histogram, alpha=0.7, color='blue')
+        plt.title("Previous Area Distribution Histogram")
+        plt.xlabel("Area Fraction")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.show()
+
+    def ExportPreviousHistogram(self):
+        button = self.sender()
+        index = self.previousResultsTable2.indexAt(button.pos()).row()
+
+        data = self.savedAreaDistributions[index-1]
+        with open(f"AreaDistributionData_{self.previousResultsTable.item(index, 0).text()}.csv", "a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(data)
+
+    def BeginSizeDistMeasurement(self):
+        c1 = self.step1Number.palette().button().color().name()
+
+        if c1 == "#90ee90":
+            self.parentTab.MoveToSizeDistributionWidget()
+        else:
+            msg = QtWidgets.QMessageBox()
+            msg.setIcon(QtWidgets.QMessageBox.Critical)
+            msg.setText("Error")
+            msg.setInformativeText('Please select input file.')
+            msg.setWindowTitle("Error")
+            msg.exec_()
+
     def CheckImagePath(self):
         try:
             io.imread(self.imagePathBox.text())
@@ -524,6 +594,21 @@ class SetupWidget(QtWidgets.QWidget):
         self.previousResultsTable.setItem(rowPosition,1, QtWidgets.QTableWidgetItem(f"{100*p_st:.2f}%"))
         self.previousResultsTable.setItem(rowPosition,2, QtWidgets.QTableWidgetItem(f"{int(self.GetConfidence()*100)}% CI: ({100*lowerCL:.1f}%, {100*upperCL:.1f}%)"))
         self.previousResultsTable.setItem(rowPosition,3, QtWidgets.QTableWidgetItem(f"{100*(upperCL-lowerCL)/2:.2f}%"))
+
+    def AddSizeDistResultsToTable(self, distribution):
+        rowPosition = self.previousResultsTable2.rowCount()
+        self.previousResultsTable2.insertRow(rowPosition)
+
+        self.savedAreaDistributions.append(distribution)
+
+        self.previousResultsTable2.setItem(rowPosition,0, QtWidgets.QTableWidgetItem(f"{os.path.basename(self.imagePathBox.text())}"))
+        self.btn = QtWidgets.QPushButton("Show", self)
+        self.btn.clicked.connect(self.ShowPreviousHistogram)
+        self.previousResultsTable2.setCellWidget(rowPosition, 1, self.btn)
+
+        self.btn2 = QtWidgets.QPushButton("Export", self)
+        self.btn2.clicked.connect(self.ExportPreviousHistogram)
+        self.previousResultsTable2.setCellWidget(rowPosition, 2, self.btn2)
 
     def Clear(self):
         # Reset step 1 text
@@ -1217,6 +1302,278 @@ class ConstituentCountingWidget(QtWidgets.QWidget):
         self.UpdateDisplay()
 
 
+class SizeMeasurementWidget(QtWidgets.QWidget):
+    def __init__(self, parentTab):
+        super(SizeMeasurementWidget, self).__init__()
+
+        self.parentTab = parentTab
+
+        self.displayToggle = 0
+
+        self.sc = MplCanvas(self, width=7, height=7, dpi=100)
+
+        vbox = QtWidgets.QVBoxLayout()
+
+        hbox2 = QtWidgets.QHBoxLayout()
+
+        self.lastEntryText = QtWidgets.QLabel("Last Entry: --")
+        self.lastEntryText.setAlignment(QtCore.Qt.AlignCenter)
+        self.lastEntryText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        self.indexProgressText = QtWidgets.QLabel(f"Sample: -/-")
+        self.indexProgressText.setAlignment(QtCore.Qt.AlignCenter)
+        self.indexProgressText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        hbox2.addWidget(self.lastEntryText)
+        hbox2.addWidget(self.indexProgressText)
+        
+        self.zoomOutButton = QtWidgets.QPushButton("Zoom Out")
+        self.zoomOutButton.clicked.connect(self.ZoomOut)
+        self.zoomInButton = QtWidgets.QPushButton("Zoom In")
+        self.zoomInButton.clicked.connect(self.ZoomIn)
+
+        hbox2.addWidget(self.zoomOutButton)
+        hbox2.addWidget(self.zoomInButton)
+
+        vbox.addLayout(hbox2)
+        vbox.addWidget(self.sc)
+        hbox = QtWidgets.QHBoxLayout()
+
+        leftText = QtWidgets.QLabel("Left Arrow Key For 0")
+        leftText.setAlignment (QtCore.Qt.AlignCenter)
+        leftText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        upText = QtWidgets.QLabel("")
+        upText.setAlignment (QtCore.Qt.AlignCenter)
+        upText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        rightText = QtWidgets.QLabel("Right Arrow Key For 1")
+        rightText.setAlignment (QtCore.Qt.AlignCenter)
+        rightText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        downText = QtWidgets.QLabel("Down Arrow Key To Go Back")
+        downText.setAlignment (QtCore.Qt.AlignCenter)
+        downText.setStyleSheet("background-color: light gray; border: 1px solid black;")
+
+        vbox2 = QtWidgets.QVBoxLayout()
+        vbox2.addWidget(upText)
+        vbox2.addWidget(downText)
+
+        hbox.addWidget(leftText)
+        hbox.addLayout(vbox2)
+        hbox.addWidget(rightText)
+        vbox.addLayout(hbox)
+
+        self.setLayout(vbox)
+        
+        self.numSurroundingPixels = 50
+        self.areaDistribution = []
+
+    def DrawFeatureBoundBox(self):
+        img = self.myMap.ToNumpy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        screen = QtWidgets.QApplication.primaryScreen()
+        screen_size = screen.size()
+        max_width = int(screen_size.width() * 0.9)
+        max_height = int(screen_size.height() * 0.9)
+        
+        img_disp = img.copy()
+        h, w = img_disp.shape[:2]
+        scale = min(max_width / w, max_height / h, 1.0)
+        if scale < 1.0:
+            img_disp = cv2.resize(img_disp, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+        # top left x, top left y, width, height
+        countAreaBounds = cv2.selectROI("Select a ROI and then press ENTER button", img_disp)
+        cv2.destroyWindow('Select a ROI and then press ENTER button')
+
+        if countAreaBounds[2] == 0 and countAreaBounds[3] == 0: # no roi selected
+            self.parentTab.MoveToSetupWidget(sizeDist=np.array(self.areaDistribution))
+            plt.hist(self.areaDistribution, bins=10)
+            plt.xlabel("Pore Area (pixels)")
+            plt.ylabel("Frequency")
+            plt.show()
+            return
+        else:
+            # pass
+            countAreaBounds = [int(n/scale) for n in countAreaBounds]  # Convert to original image coordinates
+
+        print(countAreaBounds)
+        self.InitializeCounting(countAreaBounds)
+
+    def InitializeWidget(self, imagePath):
+        self.areaDistribution = []
+
+        self.imageName = imagePath
+        image = io.imread(imagePath)
+        self.myMap = PixelMap(image)
+
+        self.DrawFeatureBoundBox()
+        
+    def InitializeCounting(self, countAreaBounds):
+        topLeftX = int(countAreaBounds[0])
+        topLeftY = int(countAreaBounds[1])
+        width = int(countAreaBounds[2])
+        height = int(countAreaBounds[3])
+
+        self.numCols = len(np.arange(topLeftX, topLeftX + width-1, 5))
+        self.numRows = len(np.arange(topLeftY, topLeftY + height-1, 5))
+
+        X, Y = np.mgrid[topLeftX:topLeftX + width-1:5, topLeftY:topLeftY + height-1:5]
+        samplePositions = np.vstack([X.ravel(), Y.ravel()])
+        self.samplePositions = np.array(list(zip(samplePositions[0,:], samplePositions[1,:])))
+
+        # ############# #
+        # Begin display #
+        # ############# #
+
+        self.countArea = width * height
+        self.gridIndex = 0 # Used to track flattend index, useful for writing to 1D poreData
+        self.numGrids = self.samplePositions.shape[0]
+
+        self.poreData = np.zeros((self.numGrids))
+        self.indexProgressText.setText(f"Sample: {self.gridIndex+1}/{self.numGrids+1}")
+
+        self.UpdateDisplay()
+
+        self.setFocus(QtCore.Qt.NoFocusReason) # Needed or the keyboard will not work
+
+    def ZoomOut(self):
+        if self.numSurroundingPixels < 300:
+            self.numSurroundingPixels += 25
+        
+        self.UpdateDisplay()
+
+        if self.numSurroundingPixels >= 300:
+            self.zoomOutButton.setEnabled(False)
+        else:
+            self.zoomOutButton.setEnabled(True)
+
+        if self.numSurroundingPixels <= 25:
+            self.zoomInButton.setEnabled(False)
+        else:
+            self.zoomInButton.setEnabled(True)
+        
+        self.setFocus(QtCore.Qt.NoFocusReason) # Needed or the keyboard will not work
+    
+    def ZoomIn(self):
+        if self.numSurroundingPixels > 25:
+            self.numSurroundingPixels -= 25
+        
+        self.UpdateDisplay()
+
+        if self.numSurroundingPixels == 25:
+            self.zoomInButton.setEnabled(False)
+        else:
+            self.zoomInButton.setEnabled(True)
+
+        if self.numSurroundingPixels == 300:
+            self.zoomOutButton.setEnabled(False)
+        else:
+            self.zoomOutButton.setEnabled(True)
+        
+        self.setFocus(QtCore.Qt.NoFocusReason) # Needed or the keyboard will not work
+        
+    def keyPressEvent(self, event):
+        if self.parentTab.stackedWidget.currentIndex() != 3:
+            return
+        
+        if event.key() == QtCore.Qt.Key_Left:
+            self.RecordDataPoint(0)
+            self.lastEntryText.setText("Last Data Entry: 0")
+        elif event.key() == QtCore.Qt.Key_Right:
+            self.RecordDataPoint(1)
+            self.lastEntryText.setText("Last Data Entry: 1")
+        elif event.key() == QtCore.Qt.Key_Down:
+            self.RecordDataPoint(-1)
+            self.lastEntryText.setText("Last Data Entry: Back")
+        elif event.key() == QtCore.Qt.Key_Plus:
+            self.ZoomIn()
+        elif event.key() == QtCore.Qt.Key_Minus:
+            self.ZoomOut()
+        elif event.key() == QtCore.Qt.Key_H:
+            self.ToggleDisplay()
+        else:
+            pass
+    
+    def BresenhamLine(self, x1, y1, x2, y2):
+        points = []
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx - dy
+
+        while True:
+            points.append((x1, y1))  # Add the current point to the list
+            if x1 == x2 and y1 == y2:  # Stop when the end point is reached
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x1 += sx
+            if e2 < dx:
+                err += dx
+                y1 += sy
+
+        return points
+
+    def RecordDataPoint(self, value):
+        # -1 is go back
+        if value == -1 and self.gridIndex > 0: # move back one sample
+            self.gridIndex -= 1
+        elif value == -1 and self.gridIndex == 0: # at the beginning of samples, do nothing
+            pass
+        else: # record value
+            self.poreData[self.gridIndex] = value
+            self.gridIndex += 1
+
+        if self.gridIndex >= self.numGrids:
+            areaFraction = np.sum(self.poreData) / self.numGrids
+            pixelArea = areaFraction * self.countArea
+            self.areaDistribution.append(pixelArea)
+
+            poreData2D = np.reshape(self.poreData, (self.numCols, self.numRows)).astype(np.uint8)
+            poreData2D = np.pad(poreData2D, 1, "constant", constant_values=0)
+            boundaryMask = find_boundaries(poreData2D, mode='inner', background=0)
+            boundaryMask = boundaryMask[1:-1,1:-1] # remove padding
+
+            sampleLocations2D = np.reshape(self.samplePositions, (self.numCols, self.numRows, 2)).astype(np.int16)
+
+            boundaryPixels = sampleLocations2D[boundaryMask]
+            
+            for i in range(len(boundaryPixels)-1):
+                pixels = self.BresenhamLine(boundaryPixels[i][0], boundaryPixels[i][1], boundaryPixels[i+1][0], boundaryPixels[i+1][1])
+                for pixel in pixels:
+                    self.myMap.ChangePixelColor(pixel[1], pixel[0], (255,0,0))
+
+            self.DrawFeatureBoundBox()
+
+            return
+
+        self.indexProgressText.setText(f"Sample: {self.gridIndex+1}/{self.numGrids}")
+
+        self.UpdateDisplay()
+
+    def UpdateDisplay(self):
+        displayImage = self.myMap.GetImageWithGridOverlay(self.samplePositions[self.gridIndex][1], self.samplePositions[self.gridIndex][0], (50, 225, 248), self.numSurroundingPixels, self.displayToggle)
+
+        self.sc.axes.cla()
+        self.sc.axes.imshow(displayImage)
+        self.sc.axes.set_yticks([])
+        self.sc.axes.set_xticks([])
+        self.sc.draw()
+
+    def ToggleDisplay(self):
+        if self.displayToggle != 2:
+            self.displayToggle += 1
+        else:
+            self.displayToggle = 0
+        
+        self.UpdateDisplay()
+
+
 class MyWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
@@ -1233,10 +1590,12 @@ class MyWindow(QtWidgets.QMainWindow):
         self.setupWidget = SetupWidget(self)
         self.initalGuessWidget = InitialGuessWidget(self)
         self.constituentCountingWidget = ConstituentCountingWidget(self)
+        self.sizeMeasurementWidget = SizeMeasurementWidget(self)
 
         self.stackedWidget.addWidget(self.setupWidget)
         self.stackedWidget.addWidget(self.initalGuessWidget)
         self.stackedWidget.addWidget(self.constituentCountingWidget)
+        self.stackedWidget.addWidget(self.sizeMeasurementWidget)
         
         self.stackedWidget.setCurrentIndex(0)
         
@@ -1244,9 +1603,11 @@ class MyWindow(QtWidgets.QMainWindow):
 
         self.stackedWidget.setFocus(QtCore.Qt.NoFocusReason)
 
-    def MoveToSetupWidget(self, p_st=None, lowerCL=None, upperCL=None):
+    def MoveToSetupWidget(self, p_st=None, lowerCL=None, upperCL=None, sizeDist=None):
         if p_st is not None:
             self.setupWidget.AddResultsToTable(p_st, lowerCL, upperCL)
+        if sizeDist is not None:
+            self.setupWidget.AddSizeDistResultsToTable(sizeDist)
         self.setupWidget.Clear()
         self.stackedWidget.setCurrentIndex(0)
 
@@ -1298,6 +1659,11 @@ class MyWindow(QtWidgets.QMainWindow):
 
         # Change active widget
         self.stackedWidget.setCurrentIndex(2)
+    
+    def MoveToSizeDistributionWidget(self):
+        imagePath = self.setupWidget.imagePathBox.text()
+        self.sizeMeasurementWidget.InitializeWidget(imagePath)
+        self.stackedWidget.setCurrentIndex(3)
 
 
 def main():
