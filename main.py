@@ -1438,8 +1438,8 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
             spacing = dialog.GetValue()
 
         X, Y = np.mgrid[topLeftX:topLeftX + width-1:spacing, topLeftY:topLeftY + height-1:spacing]
-        self.numCols = X.shape[1]
-        self.numRows = X.shape[0]
+        self.numCols = X.shape[0]
+        self.numRows = X.shape[1]
         samplePositions = np.vstack([X.ravel(), Y.ravel()])
         self.samplePositions = np.array(list(zip(samplePositions[0,:], samplePositions[1,:])))
 
