@@ -1,3 +1,4 @@
+from tkinter import dialog
 import numpy as np
 import scipy.stats
 import scipy.optimize
@@ -17,6 +18,7 @@ import cv2
 import math
 
 # TODO: Make it so that non-square grids can be used for full and rectangular crop (e.g., 8 strata turned into 4x2 grid)
+# TODO: 16 bit image handling
 
 # Class used to aid in displaying the image with grid overlayed onto sampled pixels
 class PixelMap:
@@ -72,12 +74,24 @@ class PixelMap:
 
         return displayImage
 
+    def GetImageWithRegularGridOverlay(self, leftBound, rightBound, topBound, bottomBound, gridSpacing):
+        displayImage = np.copy(self.originalImage)
+
+        # Draw vertical lines
+        for x in range(leftBound, rightBound, gridSpacing):
+            displayImage[:, x] = (255, 0, 0)  # Red
+
+        # Draw horizontal lines
+        for y in range(topBound, bottomBound, gridSpacing):
+            displayImage[y, :] = (255, 0, 0)  # Red
+
+        return displayImage[topBound:bottomBound, leftBound:rightBound]
+
     def GetCroppedImage(self, leftBound, rightBound, topBound, bottomBound):
         return self.originalImage[topBound:bottomBound, leftBound:rightBound]
     
     def GetCroppedAndMaskedImage(self, leftBound, rightBound, topBound, bottomBound):
         return self.originalImage[topBound:bottomBound, leftBound:rightBound]
-
 
     def ChangePixelColor(self, pixelRow, pixelCol, newColor):
         self.originalImage[pixelRow, pixelCol, 0] = newColor[0]
@@ -513,7 +527,7 @@ class SetupWidget(QtWidgets.QWidget):
         index = self.previousResultsTable2.indexAt(button.pos()).row()
 
         data = self.savedAreaDistributions[index-1]
-        with open(f"AreaDistributionData_{self.previousResultsTable.item(index, 0).text()}.csv", "a", newline="") as file:
+        with open(f"AreaDistributionData_{self.previousResultsTable2.item(index, 0).text()}.csv", "a", newline="") as file:
             writer = csv.writer(file)
             writer.writerow(data)
 
@@ -1386,8 +1400,8 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
             img_disp = cv2.resize(img_disp, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
         # top left x, top left y, width, height
-        countAreaBounds = cv2.selectROI("Select a ROI and then press ENTER button", img_disp)
-        cv2.destroyWindow('Select a ROI and then press ENTER button')
+        countAreaBounds = cv2.selectROI("Select a ROI and then press ENTER button, or press ENTER to finish measurement", img_disp)
+        cv2.destroyWindow('Select a ROI and then press ENTER button, or press ENTER to finish measurement')
 
         if countAreaBounds[2] == 0 and countAreaBounds[3] == 0: # no roi selected
             self.parentTab.MoveToSetupWidget(sizeDist=np.array(self.areaDistribution))
@@ -1418,10 +1432,14 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
         width = int(countAreaBounds[2])
         height = int(countAreaBounds[3])
 
-        self.numCols = len(np.arange(topLeftX, topLeftX + width-1, 5))
-        self.numRows = len(np.arange(topLeftY, topLeftY + height-1, 5))
+        spacing = 10
+        dialog = SpacingDialog(self.myMap.originalImage, (topLeftX, topLeftX+width, topLeftY, topLeftY+height))
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:  # Check if dialog was accepted
+            spacing = dialog.GetValue()
 
-        X, Y = np.mgrid[topLeftX:topLeftX + width-1:5, topLeftY:topLeftY + height-1:5]
+        X, Y = np.mgrid[topLeftX:topLeftX + width-1:spacing, topLeftY:topLeftY + height-1:spacing]
+        self.numCols = X.shape[1]
+        self.numRows = X.shape[0]
         samplePositions = np.vstack([X.ravel(), Y.ravel()])
         self.samplePositions = np.array(list(zip(samplePositions[0,:], samplePositions[1,:])))
 
@@ -1434,7 +1452,7 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
         self.numGrids = self.samplePositions.shape[0]
 
         self.poreData = np.zeros((self.numGrids))
-        self.indexProgressText.setText(f"Sample: {self.gridIndex+1}/{self.numGrids+1}")
+        self.indexProgressText.setText(f"Sample: {self.gridIndex+1}/{self.numGrids}")
 
         self.UpdateDisplay()
 
@@ -1557,8 +1575,12 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
         elif value == -1 and self.gridIndex == 0: # at the beginning of samples, do nothing
             pass
         else: # record value
-            self.poreData[self.gridIndex] = value
-            self.gridIndex += 1
+            try:
+                self.poreData[self.gridIndex] = value
+                self.gridIndex += 1
+            except IndexError:
+                print("Warning: Tried to add data point outside of array bounds.")
+                return
 
         if self.gridIndex >= self.numGrids:
             poreData2D = np.reshape(self.poreData, (self.numCols, self.numRows)).astype(np.uint8)
@@ -1603,6 +1625,53 @@ class SizeMeasurementWidget(QtWidgets.QWidget):
             self.displayToggle = 0
         
         self.UpdateDisplay()
+
+
+class SpacingDialog(QtWidgets.QDialog):
+    def __init__(self, image, bounds):
+        super().__init__()
+
+        self.setWindowTitle("Adjust Grid Spacing")
+
+        self.spacing = 10
+        self.sc = MplCanvas(self, width=7, height=7, dpi=100)
+        self.bounds = bounds
+        self.pixMap = PixelMap(image)
+
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimum(1)
+
+        maximum = int((bounds[1] - bounds[0])/2)
+
+        slider.setMaximum(maximum)
+        slider.setValue(self.spacing)
+        slider.valueChanged.connect(self.UpdateSpacing)
+
+        submitButton = QtWidgets.QPushButton("Submit")
+        submitButton.clicked.connect(self.accept)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self.sc)
+        layout.addWidget(slider)
+        layout.addWidget(submitButton)
+        self.setLayout(layout)
+
+        self.UpdateDisplay()
+    
+    def GetValue(self):
+        return self.spacing
+    
+    def UpdateSpacing(self, value):
+        self.spacing = value
+        self.UpdateDisplay()
+
+    def UpdateDisplay(self):
+        displayImage = self.pixMap.GetImageWithRegularGridOverlay(self.bounds[0], self.bounds[1], self.bounds[2], self.bounds[3], self.spacing)
+        self.sc.axes.cla()
+        self.sc.axes.imshow(displayImage)
+        self.sc.axes.set_yticks([])
+        self.sc.axes.set_xticks([])
+        self.sc.draw()
 
 
 class MyWindow(QtWidgets.QMainWindow):
@@ -1700,6 +1769,7 @@ class MyWindow(QtWidgets.QMainWindow):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    
 
     win = MyWindow()
 
