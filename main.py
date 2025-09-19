@@ -1222,7 +1222,7 @@ class MyWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super(MyWindow,self).__init__()
 
-        self.setWindowTitle("ProgramNameToBeDecided")
+        self.setWindowTitle("RAFT")
         self.setFixedSize(900,600)
         font = QtGui.QFont("Arial", 12)
         self.setFont(font)
