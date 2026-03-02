@@ -12,8 +12,66 @@ from matplotlib.figure import Figure
 import os
 import csv
 import cv2
+import math
 
 # TODO: Make it so that non-square grids can be used for full and rectangular crop (e.g., 8 strata turned into 4x2 grid)
+
+def compute_strata_grid(num_strata: int, height: int, width: int) -> tuple[int, int]:
+    # Returns (rows, col) so that rows * cols == num_strata
+    #   - Rows/cols approximately match height/width
+    #   - Preserves existing behavior for near-square regions
+    
+    # 1) Error Handle
+    if num_strata <= 0: raise ValueError("num_strata must be positive")
+    if width <= 0 or height <= 0: 
+        n = int(round(math.sqrt(num_strata)))
+        return(n, max(1, num_strata // n))
+
+    # 2) Calculate aspect ratio (w/ protect for tiny aspects)
+    aspect = max(height / width, 1e-9)
+
+    # 3) Preserve behavior for near-square selections
+    if 0.8 <= aspect <= 1.25: # Tweakable tolerance range
+        n = int(round(math.sqrt(num_strata)))
+        if n * n == num_strata: # Safety calculation
+            return (n, n)
+        
+    # 4) Find a factor pair (r, c) with r*c == num_strata, minimizing mismatch to aspect
+    best = None
+    for r in range(1, int(math.sqrt(num_strata)) + 1):
+        # a) Find row factor
+        if num_strata % r != 0: continue # Not a factor
+        c = num_strata // r
+
+        # b) Find column factor
+        #   - 1st Candidate: (r, c)
+        #   - 2nd Candidate: (c, r)
+        for rr, cc in [(r, c), (c, r)]:
+            # c) Compute ratio
+            ratio = rr / cc
+
+            # d) Compute "score" to compare pairs
+            #   - The lower the score, the closer it is to the original image (better)
+            score = abs(math.log(ratio) - math.log(aspect))
+
+            # e) Compute tie-breaker to pick smaller scaled one
+            #   - i.e: (3,6) and (4,8) => (3,6)
+            tie = abs(rr - cc)
+
+            # f) Create candidate tuple
+            candidate = (score, tie, rr, cc)
+
+            # g) Update best candidate
+            if best is None or candidate < best:
+                best = candidate 
+
+    # c) Fallback -- shouldn't happen if num_strata >= 1
+    if best is None:
+        n = int(round(math.sqrt(num_strata)))
+        return (n, max(1, num_strata // n))
+    
+    _, _, rows, cols = best
+    return (rows, cols)
 
 # Class used to aid in displaying the image with grid overlayed onto sampled pixels
 class PixelMap:
@@ -654,28 +712,30 @@ class InitialGuessWidget(QtWidgets.QWidget):
         # for circular and annular, this is a box around the quarter circle in which the stratum lies
 
         if self.countAreaType == "Full":
-            numStrata_N = int(np.sqrt(self.numStrata))
-            unraveledStrataIndex = np.unravel_index(self.strataIndex, (numStrata_N, numStrata_N))
-            row = unraveledStrataIndex[0]
-            col = unraveledStrataIndex[1]
+            rows, cols = compute_strata_grid(self.numStrata, self.myMap.rows, self.myMap.cols)
+            row, col = np.unravel_index(self.strataIndex, (rows, cols))
+            # Debug
+            # print("Grid:", rows, "x", cols)
 
-            topBound = int(row*self.myMap.rows/numStrata_N)
-            bottomBound = int((row+1)*self.myMap.rows/numStrata_N)
-            leftBound = int(col*self.myMap.cols/numStrata_N)
-            rightBound = int((col+1)*self.myMap.cols/numStrata_N)
+            topBound = int(row * self.myMap.rows / rows)
+            bottomBound = int((row + 1) * self.myMap.rows / rows)
+            leftBound = int(col * self.myMap.cols / cols)
+            rightBound = int((col + 1) * self.myMap.cols / cols)
 
             image = self.myMap.GetCroppedImage(leftBound, rightBound, topBound, bottomBound)   
         
         elif self.countAreaType == "Rectangular":
-            numStrata_N = int(np.sqrt(self.numStrata))
-            unraveledStrataIndex = np.unravel_index(self.strataIndex, (numStrata_N, numStrata_N))
-            row = unraveledStrataIndex[0]
-            col = unraveledStrataIndex[1]
+            roi_w = self.countAreaBounds[2]
+            roi_h = self.countAreaBounds[3]
+            rows, cols = compute_strata_grid(self.numStrata, roi_h, roi_w)
+            row, col = np.unravel_index(self.strataIndex, (rows, cols))
+            # Debug
+            # print("Grid:", rows, "x", cols)
 
-            topBound = int(self.countAreaBounds[1] + (row / numStrata_N) * self.countAreaBounds[3])
-            bottomBound = int(self.countAreaBounds[1] + ((row+1) / numStrata_N) * self.countAreaBounds[3])
-            leftBound = int(self.countAreaBounds[0] + (col / numStrata_N) * self.countAreaBounds[2])
-            rightBound = int(self.countAreaBounds[0] + ((col+1) / numStrata_N) * self.countAreaBounds[2])
+            topBound = int(self.countAreaBounds[1] + (row / rows) * roi_h)
+            bottomBound = int(self.countAreaBounds[1] + ((row + 1) / rows) * roi_h)
+            leftBound = int(self.countAreaBounds[0] + (col / cols) * roi_w)
+            rightBound = int(self.countAreaBounds[0] + ((col + 1) / cols) * roi_w)
 
             image = self.myMap.GetCroppedImage(leftBound, rightBound, topBound, bottomBound)   
         
@@ -944,18 +1004,17 @@ class ConstituentCountingWidget(QtWidgets.QWidget):
 
         if countAreaType == "Full":
 
-            numStrata_N = int(np.sqrt(self.numStrata))
+            rows, cols = compute_strata_grid(self.numStrata, self.myMap.rows, self.myMap.cols)
+            # Debug
+            # print("Grid:", rows, "x", cols)
 
             for i in range(self.numStrata):
-                unraveledStrataIndex = np.unravel_index(i, (numStrata_N, numStrata_N))
-                row = unraveledStrataIndex[0]
-                col = unraveledStrataIndex[1]
+                row, col = np.unravel_index(i, (rows, cols))
 
-                topBound = int(row*self.myMap.rows/numStrata_N)
-                bottomBound = int((row+1)*self.myMap.rows/numStrata_N)
-
-                leftBound = int(col*self.myMap.cols/numStrata_N)
-                rightBound = int((col+1)*self.myMap.cols/numStrata_N)
+                topBound = int(row * self.myMap.rows / rows)
+                bottomBound = int((row + 1) * self.myMap.rows / rows)
+                leftBound = int(col * self.myMap.cols / cols)
+                rightBound = int((col + 1) * self.myMap.cols / cols)
 
                 random = np.random.choice(np.arange(0,((bottomBound-topBound) * (rightBound-leftBound))), n_h[i], replace=False)
                 random = np.array(np.unravel_index(random, (bottomBound-topBound,rightBound-leftBound)))
@@ -966,17 +1025,18 @@ class ConstituentCountingWidget(QtWidgets.QWidget):
 
         elif countAreaType == "Rectangular":
 
-            numStrata_N = int(np.sqrt(self.numStrata))
-            
-            for i in range(self.numStrata):
-                unraveledStrataIndex = np.unravel_index(i, (numStrata_N, numStrata_N))
-                row = unraveledStrataIndex[0]
-                col = unraveledStrataIndex[1]
+            roi_x, roi_y, roi_w, roi_h = countAreaBounds
+            rows, cols = compute_strata_grid(self.numStrata, roi_h, roi_w)
+            # Debug
+            # print("Grid:", rows, "x", cols)
 
-                topBound = int(countAreaBounds[1] + (row / numStrata_N) * countAreaBounds[3])
-                bottomBound = int(countAreaBounds[1] + ((row+1) / numStrata_N) * countAreaBounds[3])
-                leftBound = int(countAreaBounds[0] + (col / numStrata_N) * countAreaBounds[2])
-                rightBound = int(countAreaBounds[0] + ((col+1) / numStrata_N) * countAreaBounds[2])
+            for i in range(self.numStrata):
+                row, col = np.unravel_index(i, (rows, cols))
+
+                topBound = int(roi_y + (row / rows) * roi_h)
+                bottomBound = int(roi_y + ((row + 1)/ rows) * roi_h)
+                leftBound = int(roi_x + (col / cols) * roi_w)
+                rightBound = int(roi_x + ((col + 1) / cols) * roi_w)
 
                 random = np.random.choice(np.arange(0,((bottomBound-topBound) * (rightBound-leftBound))), n_h[i], replace=False)
                 random = np.array(np.unravel_index(random, (bottomBound-topBound,rightBound-leftBound)))
