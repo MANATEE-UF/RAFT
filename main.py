@@ -199,7 +199,7 @@ class SetupWidget(QtWidgets.QWidget):
         # Step 3 widgets and layout
         self.step3Number = QtWidgets.QLabel("3")
         self.step3Number.setStyleSheet("border: 3px solid black; border-radius: 40px; font: bold 24px")
-        self.setCItext = QtWidgets.QLabel("Set CI:")
+        self.setCItext = QtWidgets.QLabel("Set CL:")
         self.setCIbox = QtWidgets.QLineEdit("")
         self.setMOEtext = QtWidgets.QLabel("Set MOE:")
         self.setMOEbox = QtWidgets.QLineEdit("")
